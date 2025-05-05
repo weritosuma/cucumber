@@ -1,3 +1,39 @@
+```
+https://cucumber.netlify.app/docs/guides/overview/
+
+BDD - ответвление от TDD, тесты пишутся на естеснвтенно языке
+
+BDD состоит из:
+1 Title - описание бизнес цели
+2 Narrative - описание кто заинтересован в истории, ее состав и ценность для бизнеса
+3 Scenarios - сам тест? сохранение данных, запрос, сверка результата
+
+Cucumber - использует естественный язык Gherkin для BDD, его структура создается с помощью отступов, каждая строка начинается с ключевого слова
+
+Cucumber решает проблемы: 1) executable specification - шаги выполнения, 2) Automated testing, 3) Documentation в виде тестов 
+
+тесты проверяют - ответы в json и данные в бд
+
+как писать тест
+1 в файле feature
+2 данные такие как min/max для шаблона теста берутся из pplication.properties
+3 в каталоге resources - файлы json для использования в тестах
+	- все файлы указанные в тестах должны быть созданы в resources
+	- sql для получения результатов из бд тоже тут в /queries/...
+4 в kibana можно посмотреть примеры запроса и ответа, напр токен или шифрованные данные
+5 код привязанный к тесту который заполняет базу и проверяет результат в классах ...Steps
+	- создается ожидаемый результат и фактический
+6 при сравнении результатов в тесты можно задать список ignore полей т.к. не все поля мы можем создать
+7 в тестах могут быть уникальные для конкретного теста аннотации
+8 классе (напр Hooks) лежат методы хуков с аннотациями @Before/@After для авто тестов, напр заполнение базы
+9 внутри теста
+	1 @Given - заполняем базу
+		DataTable - передается в тест массив данных
+	2 @When - выполняем вызов метода сервиса (e.g. запрос rest)
+	3 @Then - сравниваем результат (данные в базе)
+		expectedTotal или DataTable - передаем для сравнения
+```
+
 ### Полный гайд по Cucumber, Gherkin, Spring Boot 3, Testcontainers и WireMock (Gradle + Java 17)
 
 ---
@@ -323,3 +359,318 @@ src/
 ```bash
 ./gradlew test -Pitest --debug-jvm # Для дебага
 ```
+
+### Пример обработки заказа магазина на Spring Boot 3 (пошагово)
+
+---
+
+#### **1. Сущности (Entity)**
+```java
+// Product.java
+@Entity
+public class Product {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String name;
+    private double price;
+    private int stock;
+
+    // Геттеры и сеттеры
+}
+
+// Order.java
+@Entity
+public class Order {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @ManyToOne
+    private User user;
+    
+    @ElementCollection
+    private Map<Long, Integer> items; // productId -> quantity
+    
+    private double totalAmount;
+    private OrderStatus status;
+
+    // Геттеры и сеттеры
+}
+
+enum OrderStatus {
+    CREATED, PAID, CANCELLED
+}
+```
+
+---
+
+#### **2. Репозитории**
+```java
+// ProductRepository.java
+public interface ProductRepository extends JpaRepository<Product, Long> {
+}
+
+// OrderRepository.java
+public interface OrderRepository extends JpaRepository<Order, Long> {
+}
+```
+
+---
+
+#### **3. Сервис обработки заказов**
+```java
+// OrderService.java
+@Service
+@Transactional
+public class OrderService {
+
+    @Autowired
+    private ProductRepository productRepository;
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    public Order createOrder(Long userId, Map<Long, Integer> items) {
+        // Проверка наличия товаров
+        items.forEach((productId, quantity) -> {
+            Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new RuntimeException("Product not found"));
+            
+            if (product.getStock() < quantity) {
+                throw new RuntimeException("Not enough stock for product " + productId);
+            }
+        });
+
+        // Расчет суммы
+        double total = items.entrySet().stream()
+            .mapToDouble(entry -> {
+                Product product = productRepository.findById(entry.getKey()).get();
+                return product.getPrice() * entry.getValue();
+            })
+            .sum();
+
+        // Создание заказа
+        Order order = new Order();
+        order.setUser(new User(userId)); // Предполагается, что User уже существует
+        order.setItems(items);
+        order.setTotalAmount(total);
+        order.setStatus(OrderStatus.CREATED);
+
+        // Обновление остатков
+        items.forEach((productId, quantity) -> {
+            Product product = productRepository.findById(productId).get();
+            product.setStock(product.getStock() - quantity);
+            productRepository.save(product);
+        });
+
+        return orderRepository.save(order);
+    }
+}
+```
+
+---
+
+#### **4. REST-контроллер**
+```java
+// OrderController.java
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+
+    @Autowired
+    private OrderService orderService;
+
+    @PostMapping
+    public ResponseEntity<?> createOrder(@RequestBody OrderRequest request) {
+        try {
+            Order order = orderService.createOrder(request.getUserId(), request.getItems());
+            return ResponseEntity.status(201).body(order);
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        }
+    }
+}
+
+// OrderRequest.java
+public class OrderRequest {
+    private Long userId;
+    private Map<Long, Integer> items;
+
+    // Геттеры и сеттеры
+}
+```
+
+---
+
+#### **5. Тесты с Cucumber и Testcontainers**
+
+**Feature-файл (`order_processing.feature`)**:
+```gherkin
+Feature: Order Processing
+  Scenario: Successful order creation
+    Given the following products exist:
+      | name   | price | stock |
+      | Laptop | 1000  | 5     |
+      | Mouse  | 50    | 10    |
+    When a POST request is sent to /api/orders with:
+      | userId | 1   |
+      | items  | { "1": 2, "2": 3 } |
+    Then the response status is 201
+    And the order total amount is 2150.0
+    And product stock is updated:
+      | productId | stock |
+      | 1         | 3     |
+      | 2         | 7     |
+
+  Scenario: Order with insufficient stock
+    Given the following products exist:
+      | name  | price | stock |
+      | Book  | 20    | 1     |
+    When a POST request is sent to /api/orders with:
+      | userId | 1   |
+      | items  | { "1": 3 } |
+    Then the response status is 409
+    And the error message is "Not enough stock for product 1"
+```
+
+---
+
+#### **6. Step Definitions**
+```java
+// OrderSteps.java
+public class OrderSteps extends BaseIntegrationTest {
+
+    @Autowired
+    private TestRestTemplate restTemplate;
+
+    @Autowired
+    private ProductRepository productRepository;
+
+    @Autowired
+    private OrderRepository orderRepository;
+
+    private ResponseEntity<Map> response;
+
+    @Given("the following products exist:")
+    public void createProducts(DataTable dataTable) {
+        List<Map<String, String>> products = dataTable.asMaps();
+        products.forEach(p -> {
+            Product product = new Product();
+            product.setName(p.get("name"));
+            product.setPrice(Double.parseDouble(p.get("price")));
+            product.setStock(Integer.parseInt(p.get("stock")));
+            productRepository.save(product);
+        });
+    }
+
+    @When("a POST request is sent to /api/orders with:")
+    public void sendOrderRequest(DataTable dataTable) {
+        Map<String, Object> request = dataTable.asMap(String.class, Object.class);
+        // Преобразование items из строки в Map<Long, Integer>
+        String itemsJson = (String) request.get("items");
+        Map<Long, Integer> items = parseJsonToMap(itemsJson);
+        
+        request.put("items", items);
+        response = restTemplate.postForEntity("/api/orders", request, Map.class);
+    }
+
+    @Then("the order total amount is {double}")
+    public void verifyTotal(double expectedTotal) {
+        Order order = orderRepository.findAll().get(0);
+        assertEquals(expectedTotal, order.getTotalAmount());
+    }
+
+    @Then("product stock is updated:")
+    public void verifyStock(DataTable dataTable) {
+        List<Map<String, String>> expected = dataTable.asMaps();
+        expected.forEach(e -> {
+            Product product = productRepository.findById(Long.parseLong(e.get("productId"))).get();
+            assertEquals(Integer.parseInt(e.get("stock")), product.getStock());
+        });
+    }
+
+    private Map<Long, Integer> parseJsonToMap(String json) {
+        // Реализация парсинга JSON (можно использовать Jackson)
+    }
+}
+```
+
+---
+
+#### **7. Конфигурация Testcontainers**
+```java
+// BaseIntegrationTest.java (как в предыдущих примерах)
+@Testcontainers
+@ActiveProfiles("itest")
+public abstract class BaseIntegrationTest {
+    // Конфигурация PostgreSQL
+}
+```
+
+---
+
+#### **8. Запуск тестов**
+```bash
+./gradlew test -Pitest
+```
+
+---
+
+#### **9. Как это работает**
+1. **Инициализация данных**: 
+   - Шаг `Given` создает продукты через ProductRepository.
+   - Testcontainers автоматически поднимает PostgreSQL.
+
+2. **Создание заказа**: 
+   - POST-запрос отправляется через TestRestTemplate.
+   - Сервис проверяет остатки, рассчитывает сумму, сохраняет заказ.
+
+3. **Проверки**:
+   - Статус ответа (201 или 409).
+   - Общая сумма заказа.
+   - Обновленные остатки товаров.
+
+---
+
+#### **10. Обработка ошибок**
+- Если товара нет в наличии, возвращается статус `409 Conflict`.
+- Для обработки исключений добавлен `try-catch` в контроллере.
+
+---
+
+#### **11. Полная структура проекта**
+```
+src/
+├── main/
+│   └── java/
+│       └── com/shop/
+│           ├── model/
+│           │   ├── Product.java
+│           │   ├── Order.java
+│           │   └── User.java
+│           ├── repository/
+│           │   ├── ProductRepository.java
+│           │   └── OrderRepository.java
+│           ├── service/
+│           │   └── OrderService.java
+│           └── controller/
+│               └── OrderController.java
+└── test/
+    ├── java/
+    │   ├── steps/
+    │   │   └── OrderSteps.java
+    │   └── config/
+    │       ├── BaseIntegrationTest.java
+    │       └── CucumberSpringConfig.java
+    └── resources/
+        ├── features/
+        │   └── order_processing.feature
+        └── application-itest.properties
+```
+
+Теперь вы можете: 
+- Создавать заказы через REST API
+- Тестировать бизнес-логику с Cucumber
+- Использовать реальную БД через Testcontainers
+- Обрабатывать ошибки недостатка товаров
