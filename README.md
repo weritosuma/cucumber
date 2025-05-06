@@ -35,239 +35,263 @@ Cucumber решает проблемы: 1) executable specification - шаги �
 	4 @And - как @Then, часто с verify проверками в тестах
 ```
 
-Приведу структурированный самоучитель с примерами для Spring Boot 3, Java 17 и Gradle:
+Приведу структурированный самоучитель с примерами:
 
-# Самоучитель по Cucumber и Gherkin с Spring Boot 3
+# Самоучитель по Cucumber и Gherkin для Spring Boot 3
 
 ## 1. Настройка проекта (build.gradle)
 
 ```groovy
-plugins {
-    id 'java'
-    id 'org.springframework.boot' version '3.2.0'
-}
-
 dependencies {
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
-    testImplementation 'io.cucumber:cucumber-spring:7.15.0'
     testImplementation 'io.cucumber:cucumber-java:7.15.0'
+    testImplementation 'io.cucumber:cucumber-spring:7.15.0'
     testImplementation 'io.cucumber:cucumber-junit-platform-engine:7.15.0'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.testcontainers:testcontainers:1.19.3'
     testImplementation 'org.testcontainers:postgresql:1.19.3'
     testImplementation 'org.testcontainers:junit-jupiter:1.19.3'
-    testImplementation 'com.github.tomakehurst:wiremock:3.0.1'
+    testImplementation 'com.github.tomakehurst:wiremock-jre8:2.35.0'
 }
 ```
 
-## 2. Конфигурация тестового окружения
+## 2. Конфигурация Testcontainers и WireMock
 
-`src/test/resources/application-itest.properties`:
-```properties
-spring.datasource.url=jdbc:tc:postgresql:15-alpine:///orderdb
-spring.datasource.driver-class-name=org.testcontainers.jdbc.ContainerDatabaseDriver
-wiremock.server.port=8089
-order.validation.min-items=1
-order.validation.max-items=10
+`src/test/java/com/example/config/IntegrationTestConfig.java`:
+```java
+@ActiveProfiles("itest")
+@Testcontainers
+public class IntegrationTestConfig {
+    
+    @Container
+    public static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15")
+        .withDatabaseName("testdb")
+        .withUsername("test")
+        .withPassword("test");
+
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+    }
+    
+    @Bean
+    public WireMockServer wireMockServer() {
+        return new WireMockServer(wireMockConfig().dynamicPort());
+    }
+}
 ```
 
-## 3. Примеры тестов с Cucumber
+## 3. Пример feature-файла с различными сценариями
 
-### 3.1 Пример с DataTable и сравнением
-
-`order.feature`:
+`src/test/resources/features/order-processing.feature`:
 ```gherkin
-Feature: Order processing
-  @OrderProcessing @TASK-123
-  Scenario: Create order with multiple items
-    Given The following order items:
+Feature: Order Processing
+  @Smoke @Task123
+  Scenario: Successful order creation
+    Given The following products exist in database:
+      | id | name    | price |
+      | 1  | Laptop  | 999   |
+      | 2  | Phone   | 699   |
+    And Payment service is available
+    When I create order with items:
       | productId | quantity |
-      | 101       | 2        |
-      | 102       | 1        |
-    When I create a new order
-    Then The response should contain:
-      | field       | value           |
-      | status      | CREATED         |
-      | totalItems  | 3               |
+      | 1         | 2        |
+    Then Response status should be 201
+    And Response should contain:
+      | field       | value          |
+      | totalPrice  | 1998           |
+      | orderStatus | PROCESSING     |
+    
+  @Validation
+  Scenario: Order with invalid data
+    When I create order with invalid data
+    Then Response status should be 400
+    And Response should contain error "Invalid order data"
 ```
+
+## 4. Step Definitions с примерами
 
 `OrderStepDefinitions.java`:
 ```java
 public class OrderStepDefinitions {
 
     @Autowired
-    private OrderRepository repository;
+    private TestRestTemplate restTemplate;
     
-    private ResponseEntity<OrderResponse> response;
-
-    @Given("The following order items:")
-    public void createOrderItems(List<Map<String, Integer>> items) {
-        // Преобразование DataTable в объект заказа
+    @Given("The following products exist in database:")
+    public void setupProducts(DataTable dataTable) {
+        List<Map<String, String>> products = dataTable.asMaps();
+        products.forEach(product -> 
+            jdbcTemplate.update(
+                "INSERT INTO products (id, name, price) VALUES (?, ?, ?)",
+                product.get("id"), product.get("name"), product.get("price")
+            )
+        );
     }
-    
-    @Then("The response should contain:")
-    public void verifyResponse(List<Map<String, String>> expected) {
-        expected.forEach(entry -> {
-            String actualValue = switch(entry.get("field")) {
-                case "status" -> response.getBody().getStatus();
-                case "totalItems" -> String.valueOf(response.getBody().getTotalItems());
-                default -> throw new IllegalArgumentException();
-            };
-            assertEquals(entry.get("value"), actualValue);
-        });
+
+    @When("I create order with items:")
+    public void createOrder(DataTable dataTable) {
+        List<Map<String, String>> items = dataTable.asMaps();
+        OrderRequest request = new OrderRequest(items);
+        response = restTemplate.postForEntity("/orders", request, Map.class);
+    }
+
+    @Then("Response status should be {int}")
+    public void verifyResponseStatus(int status) {
+        assertThat(response.getStatusCodeValue()).isEqualTo(status);
+    }
+
+    @And("Response should contain:")
+    public void verifyResponseFields(DataTable dataTable) {
+        Map<String, Object> responseBody = response.getBody();
+        dataTable.asMaps().forEach(row -> 
+            assertThat(responseBody.get(row.get("field")))
+                .isEqualTo(parseValue(row.get("value")))
+        );
     }
 }
 ```
 
-### 3.2 Пример с одиночным значением
-```gherkin
-Scenario: Get order by id
-  When I get order with id "123"
-  Then The response status should be 200
-  And The order status should be "COMPLETED"
-```
+## 5. Работа с WireMock
 
+`PaymentServiceSteps.java`:
 ```java
-@Then("The order status should be {string}")
-public void verifyOrderStatus(String expectedStatus) {
-    assertEquals(expectedStatus, response.getBody().getStatus());
+public class PaymentServiceSteps {
+
+    @Autowired
+    private WireMockServer wireMock;
+
+    @Given("Payment service is available")
+    public void setupPaymentService() {
+        wireMock.stubFor(post(urlEqualTo("/payments"))
+            .willReturn(aResponse()
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"status\": \"SUCCESS\"}")));
+    }
 }
 ```
 
-### 3.3 Пример с использованием значений из properties
+## 6. Использование application.properties
+
+`application-itest.properties`:
+```properties
+order.min-items=1
+order.max-items=10
+```
+
+В тестах:
 ```java
-@Value("${order.validation.max-items}")
-private int maxItems;
+@Value("${order.min-items}")
+private int minItems;
 
 @Then("Validate order items count")
 public void validateItemsCount() {
-    assertTrue(order.getItems().size() <= maxItems);
+    assertThat(order.getItems().size()).isBetween(minItems, maxItems);
 }
 ```
 
-## 4. Конфигурация Testcontainers и WireMock
+## 7. Аннотации для тестов
 
-`TestContainersConfig.java`:
+### Кастомные аннотации:
 ```java
-@TestConfiguration
-public class TestContainersConfig {
-    
-    @Bean(initMethod = "start", destroyMethod = "stop")
-    public WireMockServer wireMockServer() {
-        return new WireMockServer(options().port(8089));
-    }
-}
-```
-
-## 5. Аннотации для тестов
-
-### 5.1 Пользовательские аннотации
-```java
-@Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
-@CucumberOptions(tags = "@integration")
-public @interface IntegrationTest {}
-
 @Retention(RetentionPolicy.RUNTIME)
-@Target({ElementType.TYPE, ElementType.METHOD})
-@Tag("smoke")
-public @interface SmokeTest {}
-```
-
-### 5.2 Использование аннотаций
-```java
 @CucumberContextConfiguration
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("itest")
-@IntegrationTest
-@ContextConfiguration(classes = {TestContainersConfig.class})
-public class CucumberSpringConfiguration {}
+@Import(IntegrationTestConfig.class)
+public @interface CucumberIntegrationTest {}
 ```
 
-### 5.3 Запуск через командную строку
+### Маркировка тестов:
+```java
+@CucumberIntegrationTest
+@CucumberOptions(features = "classpath:features")
+@Tag("Integration")
+public class RunCucumberTest {}
+```
+
+## 8. Запуск и дебаг
+
+Запуск через Gradle:
 ```bash
-# Запуск smoke-тестов
-./gradlew test -Dcucumber.filter.tags="@smoke"
-
-# Запуск тестов для конкретной задачи
-./gradlew test -Dcucumber.filter.tags="@TASK-123"
+./gradlew test -Pprofile=itest
 ```
 
-## 6. Настройка дебага
-
-Для запуска с дебагом:
+Запуск с дебагом:
 ```bash
-./gradlew bootRun --args='--spring.profiles.active=itest --debug'
+./gradlew test -Dorg.gradle.jvmargs="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
 ```
 
-В IntelliJ:
-1. Создайте конфигурацию "Remote JVM Debug"
-2. Порт: 5005
-3. Запустите приложение с профилем `itest`
+## 9. Работа с SQL в @Given
 
-## 7. Пример использования DataTable для преобразования
+`src/test/resources/data/insert_products.sql`:
+```sql
+INSERT INTO products (id, name, price) VALUES
+(1, 'Laptop', 999),
+(2, 'Phone', 699);
+```
+
+В step-определении:
+```java
+@Given("Preloaded products")
+@Sql(scripts = "/data/insert_products.sql")
+public void preloadProducts() {}
+```
+
+## 10. Пример с DataTable для сравнения
 
 ```java
-@DataTableType
-public OrderItem convertOrderItem(Map<String, String> entry) {
-    return new OrderItem(
-        Integer.parseInt(entry.get("productId")),
-        Integer.parseInt(entry.get("quantity"))
-    );
+@Then("The response should contain following items:")
+public void verifyResponseItems(DataTable dataTable) {
+    List<Map<String, String>> expected = dataTable.asMaps();
+    List<Map<String, Object>> actual = (List) response.getBody().get("items");
+    
+    assertThat(actual).hasSameSizeAs(expected);
+    
+    IntStream.range(0, expected.size()).forEach(i -> {
+        assertThat(actual.get(i).get("productId"))
+            .isEqualTo(Integer.parseInt(expected.get(i).get("productId")));
+        assertThat(actual.get(i).get("quantity"))
+            .isEqualTo(Integer.parseInt(expected.get(i).get("quantity")));
+    });
 }
-
-@Given("The following order items:")
-public void setOrderItems(List<OrderItem> items) {
-    orderRequest.setItems(items);
-}
 ```
 
-## 8. Полная структура проекта
-```
-src/
-  test/
-    java/
-      com/example/
-        steps/
-          OrderStepDefinitions.java
-        config/
-          TestContainersConfig.java
-        CucumberSpringConfiguration.java
-    resources/
-      features/
-        order.feature
-      application-itest.properties
+## 11. Группировка тестов
+
+```java
+@Smoke
+@Feature("Order Processing")
+@Story("Basic Order Operations")
+@Task("PROJ-123")
+public class OrderFeatureTest {}
 ```
 
-## 9. Группировка тестов
-
-```gherkin
-@Regression @TASK-456
-Scenario: Update order status
-  # ...
-
-@Smoke @Security
-Scenario: Check order access
-  # ...
-```
-
-Для запуска определенных групп:
+Запуск тестов по категориям:
 ```bash
-./gradlew test -Dcucumber.filter.tags="@Smoke and not @Security"
+./gradlew test -Dcucumber.filter.tags="@Smoke and not @Wip"
 ```
 
-## 10. Интеграция с JUnit 5
+## 12. Структура проекта
 
-`build.gradle`:
-```groovy
-tasks.withType(Test).configureEach {
-    useJUnitPlatform()
-}
+```
+src/test/
+├── java/
+│   ├── config/
+│   ├── steps/
+│   └── RunCucumberTest.java
+├── resources/
+│   ├── application-itest.properties
+│   ├── features/
+│   └── data/
 ```
 
-Этот подход позволяет:
-- Использовать Testcontainers для Postgres и WireMock
-- Запускать тесты с профилем `itest`
-- Дебажить тесты через IDE
-- Группировать тесты с помощью аннотаций
-- Использовать параметризацию через DataTable
-- Интегрироваться со Spring Boot 3
+Все примеры адаптированы для:
+- Java 17
+- Spring Boot 3
+- JUnit 5
+- Testcontainers
+- Gradle
+
+Тесты можно запускать как целиком, так и по тегам, с возможностью дебага через IDE. Конфигурация позволяет работать с реальными сервисами в изолированном окружении.
