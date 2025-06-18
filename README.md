@@ -117,7 +117,27 @@ Feature: Order Processing
     Then Response status should be 400
     And Response should contain error "Invalid order data"
 ```
-
+With **Examples** block:
+```
+Scenario Outline: Login
+  Given I enter "<username>"
+  And I enter "<password>"
+  Then I see "<result>"
+  
+  Examples:
+    | username | password | result  |
+    | user1    | pass123  | Welcome |
+    | invalid  | wrong    | Error   |
+//the same as:
+Scenario: Valid login
+  Given I enter "user1"
+  And I enter "pass123"
+  Then I see "Welcome"
+Scenario: Invalid login
+  Given I enter "invalid"
+  And I enter "wrong"
+  Then I see "Error"
+```
 ## 4. Step Definitions с примерами
 
 `OrderStepDefinitions.java`:
