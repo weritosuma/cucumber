@@ -128,11 +128,13 @@ Scenario Outline: Login
     | username | password | result  |
     | user1    | pass123  | Welcome |
     | invalid  | wrong    | Error   |
+
 //the same as:
 Scenario: Valid login
   Given I enter "user1"
   And I enter "pass123"
   Then I see "Welcome"
+
 Scenario: Invalid login
   Given I enter "invalid"
   And I enter "wrong"
