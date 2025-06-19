@@ -28,6 +28,7 @@ Cucumber решает проблемы: 1) executable specification - шаги �
 8 классе (напр Hooks) лежат методы хуков с аннотациями @Before/@After для авто тестов, напр заполнение базы
 9 внутри теста
 	Note. код java с логикой и шаги feature файла связаны через regexp выражения в аннотация ниже
+	0 Background - выполняется для всех тестов (как @Before в тестах)
 	1 @Given - заполняем базу
 		DataTable - передается в тест массив данных
 	1.2 @And - как @Given, для доп условий
@@ -119,6 +120,9 @@ Feature: Order Processing
 ```
 With **Examples** block:
 ```
+Background
+	Given User token: token/my-token.txt
+	And Database has required data for order application: insert-db-data-order.sql
 Scenario Outline: Login
   Given I enter "<username>"
   And I enter "<password>"
